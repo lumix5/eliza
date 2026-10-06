@@ -1009,3 +1009,103 @@ describe("XService trusted account routing", () => {
     ]);
   });
 });
+
+describe("XService DM history walk bound", () => {
+  function dmFetchService(events: () => AsyncGenerator) {
+    const runtime = runtimeWithSettings({});
+    const service = new XService(runtime);
+    const iterator = Object.assign(events(), {
+      includes: { users: [] },
+    });
+    const listDmEvents = vi.fn(async () => iterator);
+    const session = dmSession("current-user", { listDmEvents });
+    const base = {
+      profile: { id: "current-user", username: "current" },
+      twitterClient: {
+        withAuthenticatedSession: async <T>(
+          operation: (active: AuthenticatedTwitterSession) => Promise<T>,
+        ) => operation(session),
+        isAuthenticatedSessionCurrent: () => true,
+      },
+    } as unknown as ClientBase;
+    vi.spyOn(
+      service as unknown as {
+        getTwitterClientForAccount: () => Promise<{ client: ClientBase }>;
+      },
+      "getTwitterClientForAccount",
+    ).mockResolvedValue({ client: base });
+    type Ctx = Parameters<XService["fetchConnectorMessages"]>[0];
+    return {
+      runtime,
+      service,
+      listDmEvents,
+      fetch: (params: Parameters<XService["fetchConnectorMessages"]>[1]) =>
+        service.fetchConnectorMessages(
+          { runtime, source: "x" } as Ctx,
+          params,
+        ),
+    };
+  }
+
+  it("caps the DM history walk at the caller's limit without a participant filter", async () => {
+    let pulled = 0;
+    async function* events() {
+      for (let index = 120; index >= 1; index -= 1) {
+        pulled += 1;
+        yield {
+          id: `dm-${index}`,
+          sender_id: "alice",
+          participant_ids: ["current-user", "alice"],
+          text: `message ${index}`,
+          created_at: new Date(1_800_000_000_000 + index * 1_000).toISOString(),
+        };
+      }
+    }
+    const { listDmEvents, fetch } = dmFetchService(events);
+
+    const memories = await fetch({ limit: 20 });
+
+    expect(listDmEvents).toHaveBeenCalledOnce();
+    expect(listDmEvents.mock.calls[0]?.[0]).toMatchObject({ max_results: 20 });
+    expect(pulled).toBe(20);
+    expect(memories).toHaveLength(20);
+    expect(memories[0]?.content.text).toBe("message 120");
+    expect(memories[19]?.content.text).toBe("message 101");
+  });
+
+  it("still walks the full history for a participant-filtered conversation", async () => {
+    let pulled = 0;
+    async function* events() {
+      for (let index = 30; index >= 1; index -= 1) {
+        pulled += 1;
+        const fromAlice = index % 3 === 0;
+        yield {
+          id: `dm-${index}`,
+          sender_id: fromAlice ? "alice" : "bob",
+          participant_ids: ["current-user", fromAlice ? "alice" : "bob"],
+          text: `${fromAlice ? "alice" : "bob"}-${index}`,
+          created_at: new Date(1_800_000_000_000 + index * 1_000).toISOString(),
+        };
+      }
+    }
+    const { listDmEvents, fetch } = dmFetchService(events);
+
+    const memories = await fetch({
+      target: {
+        source: "x",
+        accountId: "account-a",
+        entityId: "alice",
+        channelId: "alice",
+      } as TargetInfo,
+      limit: 3,
+    });
+
+    expect(listDmEvents.mock.calls[0]?.[0]).toMatchObject({ max_results: 50 });
+    expect(pulled).toBe(30);
+    expect(memories.map((memory) => memory.content.text)).toEqual([
+      "alice-30",
+      "alice-27",
+      "alice-24",
+    ]);
+  });
+});

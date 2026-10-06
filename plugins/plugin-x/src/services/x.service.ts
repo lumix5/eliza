@@ -1149,8 +1149,15 @@ export class XService extends Service {
     const limit = explicitConnectorLimit(params.limit);
     // A DM fetch failure (expired token, rate limit) propagates: callers
     // translate it at their boundary, and an empty list would read as an
-    // empty inbox.
-    const messages = await this.listRecentDirectMessages(accountId);
+    // empty inbox. Without a participant filter every fetched event can
+    // match, so cap the fetch at the caller's limit instead of walking the
+    // account's full DM history on every read; a target conversation still
+    // needs the walk because the full timeline interleaves other
+    // conversations' events ahead of the target's.
+    const messages = await this.listRecentDirectMessages(
+      accountId,
+      targetUserId === undefined ? limit : undefined,
+    );
 
     // A conversation with the target includes the account's own replies, so
     // match on participants, not only on who sent each message.
