@@ -320,6 +320,50 @@ describe("scheduled task production dispatcher", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("fails typed when owner target resolution itself throws (storage outage)", async () => {
+    // Same bare-target shape as the null-resolution test above, but the owner
+    // identity lookup throws (storage unavailable) instead of returning empty:
+    // the dispatcher boundary must still answer with a typed DispatchResult —
+    // never an escaping throw — so the runner records lastDispatchResult for
+    // the connector-degradation and store retry surfaces.
+    const reported: unknown[] = [];
+    const runtime = {
+      ...(makeDispatchRuntime() as unknown as Record<string, unknown>),
+      character: { name: "Test Agent" },
+      getRoomsForParticipant: vi.fn(async () => {
+        throw new Error("simulated storage outage");
+      }),
+      reportError: (scope: string, error: unknown) => {
+        reported.push({ scope, error });
+      },
+    } as unknown as IAgentRuntime;
+    const send = vi.fn(async () => ({ ok: true as const }));
+    const registry = createChannelRegistry();
+    registry.register(sendCapableChannel(send));
+    registerChannelRegistry(runtime, registry);
+
+    await expect(
+      createProductionScheduledTaskDispatcher({ runtime }).dispatch({
+        taskId: "task_owner_lookup_throws",
+        firedAtIso: "2026-05-10T12:00:00.000Z",
+        channelKey: "telegram",
+        promptInstructions: "owner reminder",
+        contextRequest: undefined,
+        output: { destination: "channel", target: "telegram" },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: "transport_error",
+      userActionable: false,
+      message:
+        'Scheduled dispatch target resolution failed for channel "telegram": Owner identity lookup failed; restore storage access and retry.',
+    });
+    // The underlying outage stays observable through reportError, and the
+    // connector was never consulted because resolution happens pre-egress.
+    expect(reported).toHaveLength(1);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("evaluates send policy before channel send", async () => {
     const runtime = makeDispatchRuntime();
     const registry = createChannelRegistry();

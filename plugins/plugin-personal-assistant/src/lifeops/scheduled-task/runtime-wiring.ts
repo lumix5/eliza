@@ -1129,10 +1129,31 @@ export function createProductionScheduledTaskDispatcher(opts: {
         };
       }
 
-      const target = await resolveScheduledTaskChannelTarget(
-        opts.runtime,
-        record,
-      );
+      let target: string | null;
+      try {
+        target = await resolveScheduledTaskChannelTarget(opts.runtime, record);
+      } catch (error) {
+        // error-policy:J1 boundary translation — owner/target resolution runs
+        // before any connector egress, so nothing was sent and acceptance is
+        // definitively "not_accepted". Degrade to the typed dispatch contract
+        // (the connector-degradation surface and the store's retry query read
+        // `metadata.lastDispatchResult`) instead of letting the throw escape;
+        // reportError keeps the storage failure visible in RECENT_ERRORS.
+        opts.runtime.reportError(
+          "lifeops:scheduled-task:dispatch-target-resolution",
+          error,
+          { taskId: record.taskId, channelKey: record.channelKey },
+        );
+        return applyDispatchPolicy({
+          ok: false,
+          reason: "transport_error",
+          acceptance: "not_accepted",
+          userActionable: false,
+          message: `Scheduled dispatch target resolution failed for channel "${record.channelKey}": ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
+      }
       if (!target) {
         return applyDispatchPolicy({
           ok: false,
